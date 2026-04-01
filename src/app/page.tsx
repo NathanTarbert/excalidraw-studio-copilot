@@ -151,10 +151,12 @@ function DiagramSession({
   urlCheckpointId,
   sessionCheckpointId,
   onSessionUpdate,
+  sendPromptRef,
 }: {
   urlCheckpointId: string | undefined;
   sessionCheckpointId: string | undefined;
   onSessionUpdate: (id: string) => void;
+  sendPromptRef?: React.MutableRefObject<((prompt: string) => Promise<void>) | null>;
 }) {
   const [currentElements, setCurrentElements] = useState<any[]>([]);
   const activeId = sessionCheckpointId ?? urlCheckpointId;
@@ -166,6 +168,23 @@ function DiagramSession({
   const copilotKitRef = useRef(copilotkit);
   agentRef.current = agent;
   copilotKitRef.current = copilotkit;
+
+  // Expose a way for parent to programmatically send a prompt to the agent
+  useEffect(() => {
+    if (sendPromptRef) {
+      sendPromptRef.current = async (prompt: string) => {
+        agentRef.current.addMessage({
+          id: crypto.randomUUID(),
+          role: "user",
+          content: prompt,
+        });
+        await copilotKitRef.current.runAgent({ agent: agentRef.current });
+      };
+    }
+    return () => {
+      if (sendPromptRef) sendPromptRef.current = null;
+    };
+  }, [sendPromptRef]);
 
   // Use a sentinel so the effect always fires on mount when urlCheckpointId is defined
   const prevCheckpointRef = useRef<string | undefined>("__unset__");
@@ -554,6 +573,7 @@ function HomeContent() {
     string | undefined
   >(urlCheckpointId);
 
+  const sendPromptRef = useRef<((prompt: string) => Promise<void>) | null>(null);
   const [qrOpen, setQrOpen] = useState(false);
   const [qrSessionId] = useState(() => crypto.randomUUID().slice(0, 12));
   const [scanStatus, setScanStatus] = useState<"waiting" | "scanned" | "picked">("waiting");
@@ -598,25 +618,11 @@ function HomeContent() {
         } else if (data.status === "picked" && data.prompt) {
           setScanStatus("picked");
           setQrOpen(false);
-          // Inject the prompt into the chat and submit
-          const input = document.querySelector<HTMLTextAreaElement | HTMLInputElement>(
-            "textarea, input[type='text']"
-          );
-          if (input) {
-            const setter =
-              Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value")?.set ??
-              Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")?.set;
-            setter?.call(input, data.prompt);
-            input.dispatchEvent(new Event("input", { bubbles: true }));
-            // Small delay then submit
-            setTimeout(() => {
-              const form = input.closest("form");
-              if (form) {
-                form.requestSubmit();
-              } else {
-                input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
-              }
-            }, 100);
+          // Send the prompt directly to the CopilotKit agent
+          if (sendPromptRef.current) {
+            sendPromptRef.current(data.prompt).catch((err) =>
+              console.error("[qr-pick] runAgent failed", err)
+            );
           }
         }
       } catch {
@@ -675,6 +681,7 @@ function HomeContent() {
         urlCheckpointId={urlCheckpointId}
         sessionCheckpointId={sessionCheckpointId}
         onSessionUpdate={setSessionCheckpointId}
+        sendPromptRef={sendPromptRef}
       />
       <main className="h-screen w-screen flex flex-col bg-white">
         <nav className="flex items-center justify-between px-6 py-3 border-b border-gray-100 shrink-0">
