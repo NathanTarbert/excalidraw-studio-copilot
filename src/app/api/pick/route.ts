@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 
 // ---------------------------------------------------------------------------
-// Storage abstraction — Redis on Vercel, in-memory locally
+// Storage abstraction — Vercel KV in production, in-memory locally
 // ---------------------------------------------------------------------------
 
 interface PickEntry {
@@ -12,13 +12,11 @@ interface PickEntry {
 // In-memory fallback (works in local dev)
 const memStore = new Map<string, PickEntry>();
 
-function getRedis() {
-  const url = process.env.UPSTASH_REDIS_REST_URL;
-  const token = process.env.UPSTASH_REDIS_REST_TOKEN;
-  if (!url || !token) return null;
-  // Lazy-import so the module doesn't break without the env vars
-  const { Redis } = require("@upstash/redis") as typeof import("@upstash/redis");
-  return new Redis({ url, token });
+function getKv() {
+  // Vercel KV auto-injects KV_REST_API_URL + KV_REST_API_TOKEN
+  if (!process.env.KV_REST_API_URL || !process.env.KV_REST_API_TOKEN) return null;
+  const { kv } = require("@vercel/kv") as typeof import("@vercel/kv");
+  return kv;
 }
 
 const PICK_TTL = 60 * 10; // 10 minutes
@@ -28,26 +26,26 @@ function key(sessionId: string) {
 }
 
 async function getEntry(sessionId: string): Promise<PickEntry | null> {
-  const redis = getRedis();
-  if (redis) {
-    return redis.get<PickEntry>(key(sessionId));
+  const kv = getKv();
+  if (kv) {
+    return kv.get<PickEntry>(key(sessionId));
   }
   return memStore.get(sessionId) ?? null;
 }
 
 async function setEntry(sessionId: string, entry: PickEntry) {
-  const redis = getRedis();
-  if (redis) {
-    await redis.set(key(sessionId), entry, { ex: PICK_TTL });
+  const kv = getKv();
+  if (kv) {
+    await kv.set(key(sessionId), entry, { ex: PICK_TTL });
   } else {
     memStore.set(sessionId, entry);
   }
 }
 
 async function deleteEntry(sessionId: string) {
-  const redis = getRedis();
-  if (redis) {
-    await redis.del(key(sessionId));
+  const kv = getKv();
+  if (kv) {
+    await kv.del(key(sessionId));
   } else {
     memStore.delete(sessionId);
   }
