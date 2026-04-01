@@ -13,6 +13,7 @@ import Link from "next/link";
 import { useEffect, useRef, useState, Suspense } from "react";
 import { createPortal } from "react-dom";
 import { useSearchParams, useRouter } from "next/navigation";
+import { QRCodeSVG } from "qrcode.react";
 import { McpWidgetZoom } from "@/components/mcp-widget-zoom";
 import { SKILLS, DEFAULT_SKILL_ID } from "@/skills";
 
@@ -449,6 +450,103 @@ function WelcomePortal({ children }: { children: React.ReactNode }) {
   return createPortal(children, target);
 }
 
+function usePickUrl(sessionId: string) {
+  const [url, setUrl] = useState("");
+  useEffect(() => {
+    const origin = window.location.origin;
+    // If running on localhost, try to resolve the LAN IP so phones can connect
+    if (
+      window.location.hostname === "localhost" ||
+      window.location.hostname === "127.0.0.1"
+    ) {
+      fetch("/api/pick/ip")
+        .then((r) => r.json())
+        .then((data) => {
+          if (data.ip) {
+            setUrl(`http://${data.ip}:${window.location.port}/pick?session=${sessionId}`);
+          } else {
+            setUrl(`${origin}/pick?session=${sessionId}`);
+          }
+        })
+        .catch(() => setUrl(`${origin}/pick?session=${sessionId}`));
+    } else {
+      setUrl(`${origin}/pick?session=${sessionId}`);
+    }
+  }, [sessionId]);
+  return url;
+}
+
+function QrModal({
+  isOpen,
+  onClose,
+  sessionId,
+  scanStatus,
+}: {
+  isOpen: boolean;
+  onClose: () => void;
+  sessionId: string;
+  scanStatus: "waiting" | "scanned" | "picked";
+}) {
+  const pickUrl = usePickUrl(sessionId);
+  if (!isOpen) return null;
+
+  return (
+    <>
+      <div className="fixed inset-0 bg-black/40 z-50" onClick={onClose} />
+      <div className="fixed inset-0 z-50 flex items-center justify-center p-6">
+        <div className="bg-white rounded-2xl shadow-2xl max-w-sm w-full p-8 flex flex-col items-center gap-5 relative">
+          <button
+            onClick={onClose}
+            className="absolute top-4 right-4 text-gray-400 hover:text-gray-700 transition-colors cursor-pointer"
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+              <line x1="18" y1="6" x2="6" y2="18" />
+              <line x1="6" y1="6" x2="18" y2="18" />
+            </svg>
+          </button>
+          <div className="text-center">
+            <h2 className="text-lg font-semibold text-gray-900">Scan to Pick a Design</h2>
+            <p className="text-sm text-gray-500 mt-1">
+              Scan this QR code with your phone to choose an architecture pattern
+            </p>
+          </div>
+          <div className="bg-white p-4 rounded-xl border border-gray-100 shadow-sm">
+            {pickUrl ? (
+              <QRCodeSVG value={pickUrl} size={200} level="M" />
+            ) : (
+              <div className="w-[200px] h-[200px] flex items-center justify-center text-gray-300 text-sm">
+                Loading...
+              </div>
+            )}
+          </div>
+          <div className="h-6 flex items-center">
+            {scanStatus === "waiting" && (
+              <p className="text-sm text-gray-400">Scan the QR code with your phone</p>
+            )}
+            {scanStatus === "scanned" && (
+              <div className="flex items-center gap-2 text-[#6965db]">
+                <svg
+                  width="14"
+                  height="14"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  className="animate-spin"
+                >
+                  <path d="M21 12a9 9 0 1 1-6.219-8.56" />
+                </svg>
+                <p className="text-sm">Someone&apos;s choosing a design...</p>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    </>
+  );
+}
+
 function HomeContent() {
   const searchParams = useSearchParams();
   const urlCheckpointId = searchParams.get("checkpoint") ?? undefined;
@@ -456,6 +554,9 @@ function HomeContent() {
     string | undefined
   >(urlCheckpointId);
 
+  const [qrOpen, setQrOpen] = useState(false);
+  const [qrSessionId] = useState(() => crypto.randomUUID().slice(0, 12));
+  const [scanStatus, setScanStatus] = useState<"waiting" | "scanned" | "picked">("waiting");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [selectedSkillId, setSelectedSkillId] = useState<string>(() => {
     if (typeof window !== "undefined") {
@@ -479,6 +580,51 @@ function HomeContent() {
   useEffect(() => {
     setSessionCheckpointId(urlCheckpointId);
   }, [urlCheckpointId]);
+
+  // Reset scan status when modal opens
+  useEffect(() => {
+    if (qrOpen) setScanStatus("waiting");
+  }, [qrOpen]);
+
+  // Poll for QR pick submissions
+  useEffect(() => {
+    if (!qrOpen) return;
+    const interval = setInterval(async () => {
+      try {
+        const res = await fetch(`/api/pick?sessionId=${qrSessionId}`);
+        const data = await res.json();
+        if (data.status === "scanned") {
+          setScanStatus("scanned");
+        } else if (data.status === "picked" && data.prompt) {
+          setScanStatus("picked");
+          setQrOpen(false);
+          // Inject the prompt into the chat and submit
+          const input = document.querySelector<HTMLTextAreaElement | HTMLInputElement>(
+            "textarea, input[type='text']"
+          );
+          if (input) {
+            const setter =
+              Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value")?.set ??
+              Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")?.set;
+            setter?.call(input, data.prompt);
+            input.dispatchEvent(new Event("input", { bubbles: true }));
+            // Small delay then submit
+            setTimeout(() => {
+              const form = input.closest("form");
+              if (form) {
+                form.requestSubmit();
+              } else {
+                input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+              }
+            }, 100);
+          }
+        }
+      } catch {
+        // ignore polling errors
+      }
+    }, 2000);
+    return () => clearInterval(interval);
+  }, [qrOpen, qrSessionId]);
 
   useEffect(() => {
     const handler = async (e: MessageEvent) => {
@@ -567,6 +713,23 @@ function HomeContent() {
               Workspaces
             </Link>
             <button
+              onClick={() => setQrOpen(true)}
+              className="flex items-center justify-center w-8 h-8 rounded-md text-gray-400 hover:text-gray-700 hover:bg-gray-50 border border-transparent hover:border-gray-200 transition-colors cursor-pointer"
+              title="QR Code Pick"
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round">
+                <rect x="2" y="2" width="8" height="8" rx="1" />
+                <rect x="14" y="2" width="8" height="8" rx="1" />
+                <rect x="2" y="14" width="8" height="8" rx="1" />
+                <rect x="14" y="14" width="4" height="4" rx="0.5" />
+                <line x1="22" y1="14" x2="22" y2="18" />
+                <line x1="18" y1="22" x2="22" y2="22" />
+                <rect x="5" y="5" width="2" height="2" rx="0.25" fill="currentColor" stroke="none" />
+                <rect x="17" y="5" width="2" height="2" rx="0.25" fill="currentColor" stroke="none" />
+                <rect x="5" y="17" width="2" height="2" rx="0.25" fill="currentColor" stroke="none" />
+              </svg>
+            </button>
+            <button
               onClick={() => setSettingsOpen(true)}
               className="flex items-center justify-center w-8 h-8 rounded-md text-gray-400 hover:text-gray-700 hover:bg-gray-50 border border-transparent hover:border-gray-200 transition-colors cursor-pointer"
               title="Settings"
@@ -584,6 +747,7 @@ function HomeContent() {
           selectedSkillId={selectedSkillId}
           onSelect={setSelectedSkillId}
         />
+        <QrModal isOpen={qrOpen} onClose={() => setQrOpen(false)} sessionId={qrSessionId} scanStatus={scanStatus} />
         {urlCheckpointId && <CheckpointBanner checkpointId={urlCheckpointId} />}
         <div className="flex-1 flex justify-center overflow-hidden min-h-0 pt-28">
           <div className="w-full max-w-2xl h-full flex flex-col">
